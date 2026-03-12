@@ -1,0 +1,1 @@
+# This file contains functions for backtesting the trading strategy.
