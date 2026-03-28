@@ -1,23 +1,91 @@
 # This file contains functions for Cross Validation of the trading strategy.
 #
-# Two validators:
+# Workflow:
+#   1. temporal_split() — chop off a final holdout set (1.5 years) that is
+#      NEVER touched during development. All feature engineering, model
+#      selection, and hyperparameter tuning happen on the dev set only.
 #
-#   1. WalkForwardPurgedCV (PRIMARY) — expanding-window walk-forward.
-#      For test fold j, trains ONLY on periods 1..j-1. Eliminates the
-#      feature leakage problem where sequential estimates (rolling OLS,
-#      Kalman filter) computed on future data bleed into training features.
+#   2. WalkForwardPurgedCV (PRIMARY) — expanding-window walk-forward on the
+#      dev set. For test fold j, trains ONLY on periods 1..j-1. Eliminates
+#      feature leakage from sequential estimates (rolling OLS, Kalman).
 #      Purging at the train/test boundary handles label overlap.
-#      No embargo needed — we never train on data after test.
 #
-#   2. PurgedKFold (SECONDARY) — symmetric purged k-fold from AFML Ch.7.
-#      Kept for reference / comparison, but NOT recommended as the primary
-#      validator for this pipeline because training on future data leaks
-#      through sequentially estimated features.
+#   3. PurgedKFold (SECONDARY) — symmetric purged k-fold from AFML Ch.7.
+#      Kept for reference / comparison, NOT recommended as primary.
+#
+#   4. cv_score() — runs any CV class and reports train/test scores per fold.
 
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss, accuracy_score
+
+
+# ===================================================================
+# 0. Dev / Holdout Split
+# ===================================================================
+
+def temporal_split(X, y, t1, sample_weight=None, n_holdout=375):
+    """
+    Split data into dev (for CV during development) and holdout (touched once).
+
+    The holdout is the LAST n_holdout observations by time. This ensures
+    no future information leaks from holdout into dev.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix with DatetimeIndex, time-sorted.
+    y : pd.Series
+        Labels, aligned to X.
+    t1 : pd.Series
+        First barrier touch timestamps (from get_bins).
+    sample_weight : pd.Series, optional
+        Uniqueness weights (from get_avg_uniqueness).
+    n_holdout : int
+        Number of observations to reserve as final holdout.
+        375 trading days ≈ 1.5 years. (default 375)
+
+    Returns
+    -------
+    dict with keys:
+        'X_dev', 'y_dev', 't1_dev', 'w_dev'       — development set
+        'X_holdout', 'y_holdout', 't1_holdout', 'w_holdout' — holdout set
+        'cutoff_date' — first date of the holdout period
+    """
+    n = len(X)
+    if n_holdout >= n:
+        raise ValueError(f"n_holdout ({n_holdout}) >= total observations ({n})")
+
+    cutoff = n - n_holdout
+
+    result = {
+        'X_dev': X.iloc[:cutoff],
+        'y_dev': y.iloc[:cutoff],
+        't1_dev': t1.iloc[:cutoff],
+        'X_holdout': X.iloc[cutoff:],
+        'y_holdout': y.iloc[cutoff:],
+        't1_holdout': t1.iloc[cutoff:],
+        'cutoff_date': X.index[cutoff],
+    }
+
+    if sample_weight is not None:
+        result['w_dev'] = sample_weight.iloc[:cutoff]
+        result['w_holdout'] = sample_weight.iloc[cutoff:]
+    else:
+        result['w_dev'] = None
+        result['w_holdout'] = None
+
+    # Print summary
+    print(f"Dev set:     {len(result['X_dev']):>5} obs  "
+          f"({result['X_dev'].index[0].date()} → {result['X_dev'].index[-1].date()})")
+    print(f"Holdout set: {len(result['X_holdout']):>5} obs  "
+          f"({result['X_holdout'].index[0].date()} → {result['X_holdout'].index[-1].date()})")
+    print(f"Cutoff date: {result['cutoff_date'].date()}")
+    print(f"Dev label dist:     { {k: v for k, v in result['y_dev'].value_counts().sort_index().items()} }")
+    print(f"Holdout label dist: { {k: v for k, v in result['y_holdout'].value_counts().sort_index().items()} }")
+
+    return result
 
 
 # ===================================================================
