@@ -244,3 +244,130 @@ def get_avg_uniqueness(labels, trading_days):
         avg_u.loc[entry] = (1.0 / event_concurrency).mean()
     
     return avg_u
+
+
+def get_ind_matrix(trading_days, t1):
+    '''
+    Build indicator matrix: which bars influence each event's label.
+    
+    Adapted from AFML Snippet 4.3. Entry (t, i) = 1 if bar t falls within
+    event i's lifespan [entry_i, t1_i].
+    
+    Parameters
+    ----------
+    trading_days : pd.DatetimeIndex — all trading days
+    t1 : pd.Series — first barrier touch for each event.
+                      Index = entry dates, values = exit dates.
+    
+    Returns
+    -------
+    pd.DataFrame — binary matrix, shape (len(trading_days), len(t1)).
+                   Rows = bars, columns = event indices (0..I-1).
+    '''
+    import pandas as pd
+    
+    ind_m = pd.DataFrame(0, index=trading_days, columns=range(t1.shape[0]))
+    for i, (t0, t1_i) in enumerate(t1.items()):
+        ind_m.loc[t0:t1_i, i] = 1.0
+    
+    return ind_m
+
+
+def seq_bootstrap(t1, trading_days, s_length=None, random_state=None):
+    '''
+    Generate a sample via sequential bootstrap (AFML Snippet 4.5).
+    
+    Draws observations with replacement, where the probability of each
+    draw is proportional to the average uniqueness that observation would
+    have if added to the current sample. This produces bootstrap samples
+    much closer to IID than standard random sampling.
+    
+    Uses numba JIT if available (~0.1s per bag), otherwise falls back to
+    pure numpy (~2s per bag of 300 draws from 2600 events).
+    
+    Parameters
+    ----------
+    t1 : pd.Series — first barrier touch for each event.
+                      Index = entry dates, values = exit dates.
+    trading_days : pd.DatetimeIndex — all trading days in the dataset
+    s_length : int, optional — number of draws (default = number of events)
+    random_state : int, optional — random seed for reproducibility
+    
+    Returns
+    -------
+    list of int — indices into t1 (may contain repeats)
+    '''
+    import numpy as np
+    
+    n_events = len(t1)
+    if s_length is None:
+        s_length = n_events
+    if random_state is None:
+        random_state = np.random.randint(0, 2**31)
+    
+    # Convert event lifespans to positional indices
+    day_to_pos = {d: p for p, d in enumerate(trading_days)}
+    pos_start = np.array([day_to_pos[d] for d in t1.index], dtype=np.int64)
+    pos_end = np.array([day_to_pos[d] for d in t1.values], dtype=np.int64)
+    n_bars = len(trading_days)
+    
+    # Try numba for ~20x speedup; fall back to numpy if unavailable
+    try:
+        from numba import njit
+        
+        @njit
+        def _core(pos_start, pos_end, n_bars, n_events, s_length, seed):
+            np.random.seed(seed)
+            concurrency = np.zeros(n_bars, dtype=np.float64)
+            phi = np.empty(s_length, dtype=np.int64)
+            avg_u = np.zeros(n_events, dtype=np.float64)
+            
+            for draw in range(s_length):
+                for i in range(n_events):
+                    total = 0.0
+                    count = 0
+                    for t in range(pos_start[i], pos_end[i] + 1):
+                        total += 1.0 / (concurrency[t] + 1.0)
+                        count += 1
+                    avg_u[i] = total / count
+                
+                prob_sum = 0.0
+                for i in range(n_events):
+                    prob_sum += avg_u[i]
+                
+                r = np.random.random() * prob_sum
+                cumsum = 0.0
+                drawn = n_events - 1
+                for i in range(n_events):
+                    cumsum += avg_u[i]
+                    if cumsum >= r:
+                        drawn = i
+                        break
+                
+                phi[draw] = drawn
+                for t in range(pos_start[drawn], pos_end[drawn] + 1):
+                    concurrency[t] += 1.0
+            
+            return phi
+        
+        sample = _core(pos_start, pos_end, n_bars, n_events, s_length, random_state)
+        return sample.tolist()
+    
+    except ImportError:
+        # Pure numpy fallback
+        rng = np.random.RandomState(random_state)
+        concurrency = np.zeros(n_bars, dtype=np.float64)
+        phi = []
+        
+        for _ in range(s_length):
+            avg_u = np.zeros(n_events)
+            for i in range(n_events):
+                span = slice(pos_start[i], pos_end[i] + 1)
+                avg_u[i] = np.mean(1.0 / (concurrency[span] + 1.0))
+            
+            prob = avg_u / avg_u.sum()
+            drawn = rng.choice(n_events, p=prob)
+            phi.append(drawn)
+            concurrency[pos_start[drawn]:pos_end[drawn] + 1] += 1.0
+        
+        return phi
