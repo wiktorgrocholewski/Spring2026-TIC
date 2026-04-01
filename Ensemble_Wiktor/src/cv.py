@@ -1,23 +1,91 @@
 # This file contains functions for Cross Validation of the trading strategy.
 #
-# Two validators:
+# Workflow:
+#   1. temporal_split() — chop off a final holdout set (1.5 years) that is
+#      NEVER touched during development. All feature engineering, model
+#      selection, and hyperparameter tuning happen on the dev set only.
 #
-#   1. WalkForwardPurgedCV (PRIMARY) — expanding-window walk-forward.
-#      For test fold j, trains ONLY on periods 1..j-1. Eliminates the
-#      feature leakage problem where sequential estimates (rolling OLS,
-#      Kalman filter) computed on future data bleed into training features.
+#   2. WalkForwardPurgedCV (PRIMARY) — expanding-window walk-forward on the
+#      dev set. For test fold j, trains ONLY on periods 1..j-1. Eliminates
+#      feature leakage from sequential estimates (rolling OLS, Kalman).
 #      Purging at the train/test boundary handles label overlap.
-#      No embargo needed — we never train on data after test.
 #
-#   2. PurgedKFold (SECONDARY) — symmetric purged k-fold from AFML Ch.7.
-#      Kept for reference / comparison, but NOT recommended as the primary
-#      validator for this pipeline because training on future data leaks
-#      through sequentially estimated features.
+#   3. PurgedKFold (SECONDARY) — symmetric purged k-fold from AFML Ch.7.
+#      Kept for reference / comparison, NOT recommended as primary.
+#
+#   4. cv_score() — runs any CV class and reports train/test scores per fold.
 
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss, accuracy_score
+
+
+# ===================================================================
+# 0. Dev / Holdout Split
+# ===================================================================
+
+def temporal_split(X, y, t1, sample_weight=None, n_holdout=375):
+    """
+    Split data into dev (for CV during development) and holdout (touched once).
+
+    The holdout is the LAST n_holdout observations by time. This ensures
+    no future information leaks from holdout into dev.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix with DatetimeIndex, time-sorted.
+    y : pd.Series
+        Labels, aligned to X.
+    t1 : pd.Series
+        First barrier touch timestamps (from get_bins).
+    sample_weight : pd.Series, optional
+        Uniqueness weights (from get_avg_uniqueness).
+    n_holdout : int
+        Number of observations to reserve as final holdout.
+        375 trading days ≈ 1.5 years. (default 375)
+
+    Returns
+    -------
+    dict with keys:
+        'X_dev', 'y_dev', 't1_dev', 'w_dev'       — development set
+        'X_holdout', 'y_holdout', 't1_holdout', 'w_holdout' — holdout set
+        'cutoff_date' — first date of the holdout period
+    """
+    n = len(X)
+    if n_holdout >= n:
+        raise ValueError(f"n_holdout ({n_holdout}) >= total observations ({n})")
+
+    cutoff = n - n_holdout
+
+    result = {
+        'X_dev': X.iloc[:cutoff],
+        'y_dev': y.iloc[:cutoff],
+        't1_dev': t1.iloc[:cutoff],
+        'X_holdout': X.iloc[cutoff:],
+        'y_holdout': y.iloc[cutoff:],
+        't1_holdout': t1.iloc[cutoff:],
+        'cutoff_date': X.index[cutoff],
+    }
+
+    if sample_weight is not None:
+        result['w_dev'] = sample_weight.iloc[:cutoff]
+        result['w_holdout'] = sample_weight.iloc[cutoff:]
+    else:
+        result['w_dev'] = None
+        result['w_holdout'] = None
+
+    # Print summary
+    print(f"Dev set:     {len(result['X_dev']):>5} obs  "
+          f"({result['X_dev'].index[0].date()} → {result['X_dev'].index[-1].date()})")
+    print(f"Holdout set: {len(result['X_holdout']):>5} obs  "
+          f"({result['X_holdout'].index[0].date()} → {result['X_holdout'].index[-1].date()})")
+    print(f"Cutoff date: {result['cutoff_date'].date()}")
+    print(f"Dev label dist:     { {k: v for k, v in result['y_dev'].value_counts().sort_index().items()} }")
+    print(f"Holdout label dist: { {k: v for k, v in result['y_holdout'].value_counts().sort_index().items()} }")
+
+    return result
 
 
 # ===================================================================
@@ -291,3 +359,179 @@ def cv_score(model, X, y, t1, sample_weight=None, cv=None,
         'train_scores': train_scores,
         'fold_sizes': fold_sizes,
     }
+
+
+# ===================================================================
+# 4. MDA Feature Importance (AFML Ch.8, Snippet 8.3)
+# ===================================================================
+
+def feat_importance_mda(model, X, y, t1, sample_weight=None, cv=None,
+                        scoring='neg_log_loss', n_repeats=1):
+    """
+    Mean Decrease Accuracy (permutation importance) using purged CV.
+
+    For each fold: train the model, score OOS, then shuffle each feature
+    column one at a time and re-score. The importance of a feature is how
+    much performance drops when that feature is permuted.
+
+    Uses walk-forward CV by default to avoid feature leakage.
+
+    Parameters
+    ----------
+    model : sklearn-compatible estimator
+    X : pd.DataFrame — feature matrix with DatetimeIndex
+    y : pd.Series — labels
+    t1 : pd.Series — first barrier touch timestamps
+    sample_weight : pd.Series, optional — uniqueness weights (training only)
+    cv : cross-validator, optional — defaults to WalkForwardPurgedCV(3)
+    scoring : str — 'neg_log_loss' or 'accuracy'
+    n_repeats : int — number of times to shuffle each feature per fold
+                      (default 1; increase for more stable estimates)
+
+    Returns
+    -------
+    pd.DataFrame — columns 'mean' and 'std', indexed by feature name.
+                   Positive mean = feature is useful (performance drops when permuted).
+                   Negative mean = feature is detrimental.
+    """
+    from sklearn.base import clone
+
+    if cv is None:
+        cv = WalkForwardPurgedCV(n_periods=3, t1=t1)
+
+    # Baseline score per fold (no permutation)
+    scr0 = pd.Series(dtype=float)
+    # Permuted score per fold per feature
+    scr1 = pd.DataFrame(columns=X.columns, dtype=float)
+
+    for fold_i, (train_idx, test_idx) in enumerate(cv.split(X)):
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+        X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+
+        # Fit
+        fit_params = {}
+        if sample_weight is not None:
+            fit_params['sample_weight'] = sample_weight.iloc[train_idx].values
+
+        m = clone(model)
+        m.fit(X_train.values, y_train.values, **fit_params)
+
+        # Baseline OOS score
+        if scoring == 'neg_log_loss':
+            prob = m.predict_proba(X_test.values)
+            scr0.loc[fold_i] = -log_loss(y_test.values, prob)
+        else:
+            pred = m.predict(X_test.values)
+            scr0.loc[fold_i] = accuracy_score(y_test.values, pred)
+
+        # Permute each feature and re-score
+        for feat in X.columns:
+            scores_feat = []
+            for _ in range(n_repeats):
+                X_test_perm = X_test.copy()
+                perm_vals = X_test_perm[feat].values.copy()
+                np.random.shuffle(perm_vals)
+                X_test_perm[feat] = perm_vals
+
+                if scoring == 'neg_log_loss':
+                    prob = m.predict_proba(X_test_perm.values)
+                    scores_feat.append(-log_loss(y_test.values, prob))
+                else:
+                    pred = m.predict(X_test_perm.values)
+                    scores_feat.append(accuracy_score(y_test.values, pred))
+
+            scr1.loc[fold_i, feat] = np.mean(scores_feat)
+
+    # Importance = drop in performance from permuting
+    # (baseline - permuted); positive = feature helps
+    imp = (-scr1).add(scr0, axis=0)  # scr0 - scr1 for each feature
+
+    # Normalize: relative to max possible score
+    if scoring == 'neg_log_loss':
+        imp = imp / (-scr1)  # relative to permuted score magnitude
+    else:
+        imp = imp / (1.0 - scr1)  # relative to gap from perfect accuracy
+
+    imp = imp.astype(float)
+    result = pd.concat({
+        'mean': imp.mean(),
+        'std': imp.std() * imp.shape[0] ** -0.5,
+    }, axis=1)
+
+    result = result.sort_values('mean', ascending=False)
+
+    return result
+
+
+# ===================================================================
+# 5. MDI Feature Importance (AFML Ch.8, Snippet 8.2)
+# ===================================================================
+
+def feat_importance_mdi(X, y, sample_weight=None, n_estimators=500,
+                        random_state=42):
+    """
+    Mean Decrease Impurity (in-sample feature importance) from a Random Forest.
+
+    Following AFML Snippet 8.2:
+      - Uses max_features=1 to avoid masking effects (every feature gets
+        a chance at some random level of some random tree).
+      - Replaces 0 importance with NaN (0 just means the feature was not
+        randomly selected for that tree, not that it's unimportant).
+      - Normalizes so importances sum to 1.
+
+    MDI is fast and complementary to MDA. Features that rank high on BOTH
+    MDI and MDA are the most robust.
+
+    WARNING: MDI is in-sample. Every feature will have some importance
+    even if it has no predictive power. Always cross-check with MDA.
+
+    Parameters
+    ----------
+    X : pd.DataFrame — feature matrix
+    y : pd.Series — labels
+    sample_weight : pd.Series, optional — uniqueness weights
+    n_estimators : int — number of trees (default 500)
+    random_state : int
+
+    Returns
+    -------
+    pd.DataFrame — columns 'mean' and 'std', indexed by feature name,
+                   sorted by mean importance descending.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+
+    rf = RandomForestClassifier(
+        n_estimators=n_estimators,
+        max_features=1,              # AFML: avoid masking effects
+        min_samples_leaf=1,
+        class_weight='balanced',
+        random_state=random_state,
+        n_jobs=-1,
+    )
+
+    fit_params = {}
+    if sample_weight is not None:
+        fit_params['sample_weight'] = sample_weight.values
+
+    rf.fit(X.values, y.values, **fit_params)
+
+    # Extract per-tree importances
+    imp_per_tree = {i: tree.feature_importances_
+                    for i, tree in enumerate(rf.estimators_)}
+    imp_df = pd.DataFrame.from_dict(imp_per_tree, orient='index')
+    imp_df.columns = X.columns
+
+    # Replace 0 with NaN: 0 means feature wasn't randomly chosen, not unimportant
+    imp_df = imp_df.replace(0, np.nan)
+
+    result = pd.concat({
+        'mean': imp_df.mean(),
+        'std': imp_df.std() * imp_df.shape[0] ** -0.5,
+    }, axis=1)
+
+    # Normalize so importances sum to 1
+    result = result / result['mean'].sum()
+
+    result = result.sort_values('mean', ascending=False)
+
+    return result
