@@ -311,3 +311,40 @@ def merge_price_weather(price_path, weather_path, save_path=None):
         print(f"Saved to:        {save_path}")
 
     return merged
+
+def merge_weather_datasets(weather_dfs, merged_name, save_path=None):
+    """
+    Merge multiple weather DataFrames on date index, keeping only common dates.
+
+    Parameters
+    ----------
+    weather_dfs : list of pd.DataFrame
+        List of weather DataFrames to merge, each indexed by date.
+    merged_name : str
+        Name for the merged dataset (used in print statements).
+    save_path : str, optional
+        If provided, saves the merged DataFrame to this CSV path.
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged weather DataFrame with columns from all input DataFrames.
+    """
+    import pandas as pd
+
+    merged = weather_dfs[0]
+    for df in weather_dfs[1:]:
+        #merged = merged.join(df, how="inner")
+        merged = pd.concat([merged, df], axis=1)
+
+    print(f"Merged '{merged_name}':")
+    print(f"  Input datasets: {len(weather_dfs)}")
+    print(f"  Output shape:   {merged.shape}")
+    print(f"  Date range:     {merged.index.min()} to {merged.index.max()}")
+    print(f"  Missing values: {merged.isna().sum().sum()}")
+
+    if save_path:
+        merged.to_csv(save_path)
+        print(f"Saved to:        {save_path}")
+
+    return merged
