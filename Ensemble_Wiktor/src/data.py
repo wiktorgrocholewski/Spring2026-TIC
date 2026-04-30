@@ -314,28 +314,70 @@ def merge_price_weather(price_path, weather_path, save_path=None):
 
 def merge_weather_datasets(weather_dfs, merged_name, save_path=None):
     """
-    Merge multiple weather DataFrames on date index, keeping only common dates.
+    Merge multiple weather DataFrames on date index.
+
+    Each input DataFrame must either:
+    - already have a DatetimeIndex (any name), OR
+    - have a 'date' column that can be parsed to datetimes.
+
+    Inputs are normalized to a DatetimeIndex named 'date' before concatenation,
+    so the result is guaranteed to have a single 'date' index (no duplicate
+    'date' columns leaking through). Concatenation uses an outer join on the
+    date index to preserve all dates across inputs.
 
     Parameters
     ----------
     weather_dfs : list of pd.DataFrame
-        List of weather DataFrames to merge, each indexed by date.
+        Weather DataFrames to merge.
     merged_name : str
-        Name for the merged dataset (used in print statements).
+        Label used in printed diagnostics.
     save_path : str, optional
         If provided, saves the merged DataFrame to this CSV path.
 
     Returns
     -------
     pd.DataFrame
-        Merged weather DataFrame with columns from all input DataFrames.
+        Merged weather DataFrame indexed by date.
     """
     import pandas as pd
 
-    merged = weather_dfs[0]
-    for df in weather_dfs[1:]:
-        #merged = merged.join(df, how="inner")
-        merged = pd.concat([merged, df], axis=1)
+    def _normalize(df, i):
+        # Already datetime-indexed: just make sure the index is named 'date'
+        if isinstance(df.index, pd.DatetimeIndex):
+            out = df.copy()
+            out.index.name = "date"
+            return out
+
+        # Otherwise we need a 'date' column to promote to the index
+        if "date" not in df.columns:
+            raise ValueError(
+                f"Input DataFrame at position {i} has neither a DatetimeIndex "
+                f"nor a 'date' column. Columns found: {list(df.columns)[:5]}..."
+            )
+
+        out = df.copy()
+        out["date"] = pd.to_datetime(out["date"])
+        out = out.set_index("date")
+
+        # If a leftover unnamed index column got read from CSV (e.g. 'Unnamed: 0'),
+        # drop it — it's just a stale RangeIndex.
+        for junk in ("Unnamed: 0", "index"):
+            if junk in out.columns:
+                out = out.drop(columns=junk)
+
+        return out
+
+    normalized = [_normalize(df, i) for i, df in enumerate(weather_dfs)]
+
+    # Outer join on the date index (concat default) so mismatched date ranges
+    # surface as NaN rather than silently dropping rows.
+    merged = pd.concat(normalized, axis=1)
+
+    # Detect duplicate column names across locations (would indicate a bug upstream)
+    dup_cols = merged.columns[merged.columns.duplicated()].tolist()
+    if dup_cols:
+        print(f"  WARNING: {len(dup_cols)} duplicate column names after merge: "
+              f"{dup_cols[:3]}...")
 
     print(f"Merged '{merged_name}':")
     print(f"  Input datasets: {len(weather_dfs)}")
@@ -345,6 +387,6 @@ def merge_weather_datasets(weather_dfs, merged_name, save_path=None):
 
     if save_path:
         merged.to_csv(save_path)
-        print(f"Saved to:        {save_path}")
+        print(f"  Saved to:       {save_path}")
 
     return merged
