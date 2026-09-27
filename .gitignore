@@ -1,0 +1,22 @@
+# OS / editor / environment
+.DS_Store
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+
+# HTTP cache of the Open-Meteo client
+.cache.sqlite
+
+# LaTeX build files
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.log
+report/*.out
+report/*.synctex.gz
+report/*.fdb_latexmk
+report/*.fls
+
+# Reference books: copyrighted, keep them local only
+Advances in Financial Machine Learning.pdf
+Algorithmic Trading*.pdf

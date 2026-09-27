@@ -1,0 +1,5 @@
+,accuracy,log-loss
+XGBoost,0.5973,0.7181
+seq. bootstrap RF,0.5120,0.6876
+always majority class,0.5280,
+coin flip,0.5000,0.6931

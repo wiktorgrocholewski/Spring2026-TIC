@@ -1,0 +1,18 @@
+parameter,mean,std,hpd 2.5%,hpd 97.5%,geweke z,geweke p
+mu0,-3.7647,2.9145,-9.7889,0.8893,-5.5790,0.0000
+mu1,1.7898,1.5412,-0.9421,4.9932,-19.4183,0.0000
+phi,0.9963,0.0016,0.9934,0.9994,-0.0882,0.9297
+sigma2,0.0242,0.0006,0.0231,0.0253,2.5491,0.0108
+alpha0,0.7081,1.2215,-0.9815,3.0305,97.7590,0.0000
+alpha: soil_moisture_0_to_100cm_mean_mato_grosso_roll30d_min,0.0359,0.3273,-0.6318,0.6366,-11.8920,0.0000
+alpha: soil_moisture_28_to_100cm_mean_central_iowa_roll30d_min,-0.2773,0.3186,-0.8768,0.2560,-24.5768,0.0000
+alpha: precipitation_sum_central_indiana_roll30d_sum,-0.0824,0.4117,-0.8676,0.7022,44.7600,0.0000
+alpha: temperature_2m_max_mato_grosso_roll30d_mean,0.0704,0.4158,-0.7947,0.8232,39.0724,0.0000
+alpha: wind_speed_10m_max_central_iowa_roll30d_max,-0.0686,0.3713,-0.6530,0.6111,12.1659,0.0000
+alpha: relative_humidity_2m_mean_central_iowa_roll30d_mean,-0.4375,0.3679,-1.1503,0.2320,-32.2349,0.0000
+alpha: wind_speed_10m_max_parana_roll30d_max,0.2644,0.3663,-0.4786,0.8595,-87.7872,0.0000
+alpha: season_sin_1,0.3074,0.4963,-0.5122,1.2760,-24.7637,0.0000
+alpha: season_cos_1,0.5302,0.7779,-0.6192,2.0030,87.8359,0.0000
+alpha: season_sin_2,-0.2029,0.3549,-0.9009,0.4351,15.3487,0.0000
+alpha: season_cos_2,-0.6259,0.5352,-1.5872,0.4977,83.8000,0.0000
+delta,1.3347,0.7211,0.0705,2.5939,-17.2174,0.0000

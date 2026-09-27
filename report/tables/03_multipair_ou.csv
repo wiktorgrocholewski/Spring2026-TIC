@@ -1,0 +1,4 @@
+,train Sharpe,test Sharpe,Ann. return,Ann. vol,Max drawdown,Total return
+"E  pairs portfolio, EW",0.3778,0.4153,0.0355,0.0854,-0.1523,0.1465
+"E  pairs portfolio, MRB",0.0676,0.3797,0.0323,0.0849,-0.1603,0.1309
+"E  pairs portfolio, MRR",0.2413,0.4569,0.0374,0.0819,-0.1480,0.1576
